@@ -1435,6 +1435,7 @@ export class ClaudeAcpAgent implements Agent {
       promptRunning: false,
       pendingMessages: new Map(),
       nextPendingOrder: 0,
+      fileEditInterceptor,
     };
 
     return {
