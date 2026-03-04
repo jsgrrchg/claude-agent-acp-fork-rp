@@ -1064,7 +1064,7 @@ export class ClaudeAcpAgent implements Agent {
     const mcpServers: Record<string, McpServerConfig> = {};
     let fileEditInterceptor: FileEditInterceptor | undefined;
     if (this.clientCapabilities?.fs?.writeTextFile) {
-      fileEditInterceptor = createFileEditInterceptor(this.logger);
+      fileEditInterceptor = createFileEditInterceptor(this.logger, params.cwd);
     }
 
     if (Array.isArray(params.mcpServers)) {

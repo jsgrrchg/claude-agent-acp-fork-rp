@@ -76,6 +76,7 @@ import {
   WebSearchInput,
 } from "@anthropic-ai/claude-agent-sdk/sdk-tools.js";
 import * as fs from "node:fs";
+import * as path from "node:path";
 
 interface ToolInfo {
   title: string;
@@ -825,8 +826,9 @@ export interface FileEditInterceptor {
   ) => Promise<void>;
 }
 
-export function createFileEditInterceptor(logger: Logger): FileEditInterceptor {
+export function createFileEditInterceptor(logger: Logger, cwd?: string): FileEditInterceptor {
   const fileContentCache = new Map<string, string>();
+  const resolvedCwd = cwd ? path.resolve(cwd) : undefined;
 
   return {
     onFileRead(filePath: string, content: string): void {
@@ -838,6 +840,19 @@ export function createFileEditInterceptor(logger: Logger): FileEditInterceptor {
       const filePath = input?.file_path;
       if (!filePath) return;
       if (isToolError(toolResponse)) return;
+
+      // Only intercept files within the project directory.
+      // Files outside the project (e.g. ~/.claude/settings.json) should be
+      // handled by the native Claude Code tools without routing through ACP.
+      if (resolvedCwd) {
+        const resolvedFilePath = path.resolve(filePath);
+        if (
+          !resolvedFilePath.startsWith(resolvedCwd + path.sep) &&
+          resolvedFilePath !== resolvedCwd
+        ) {
+          return;
+        }
+      }
 
       const originalContent = fileContentCache.get(filePath);
 
