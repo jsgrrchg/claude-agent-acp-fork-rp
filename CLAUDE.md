@@ -140,6 +140,11 @@ Zed <──ACP (ndjson/stdio)──> ClaudeAcpAgent <──Claude Agent SDK─�
 
 GitHub Actions is not enabled on this fork, so releases are created manually via `gh`. Use the `-custom` suffix to distinguish from upstream versions (e.g., `v0.19.2-custom`). Always specify `--repo <owner>/<repo>` (matching this fork's `origin` remote) to avoid hitting the upstream repo.
 
+### Version numbering
+
+- **Standard release**: When upstream tags a new version (e.g., `v0.20.2`), our corresponding fork release is `v0.20.2-custom`.
+- **Interstitial release**: When we merge upstream commits that haven't been included in an upstream release yet, use a patch-level increment: `v<upstream>.<patch>-custom`. For example, if the latest upstream release is `v0.20.2` and we merge newer upstream commits, tag as `v0.20.2.1-custom`, `v0.20.2.2-custom`, etc. When upstream eventually tags their next release, our next `-custom` release resets to match it (e.g., `v0.20.3-custom`).
+
 ### New release
 
 ```bash
