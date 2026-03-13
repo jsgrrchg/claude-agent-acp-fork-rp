@@ -34,6 +34,8 @@ import {
   SetSessionModelResponse,
   SetSessionModeRequest,
   SetSessionModeResponse,
+  CloseSessionRequest,
+  CloseSessionResponse,
   TerminalHandle,
   TerminalOutputResponse,
   WriteTextFileRequest,
@@ -120,6 +122,7 @@ type Session = {
   pendingMessages: Map<string, { resolve: (cancelled: boolean) => void; order: number }>;
   nextPendingOrder: number;
   fileEditInterceptor?: FileEditInterceptor;
+  abortController: AbortController;
 };
 
 type BackgroundTerminal =
@@ -341,6 +344,7 @@ export class ClaudeAcpAgent implements Agent {
           fork: {},
           list: {},
           resume: {},
+          close: {},
         },
       },
       agentInfo: {
@@ -484,17 +488,23 @@ export class ClaudeAcpAgent implements Agent {
 
     const userMessage = promptToClaude(params);
 
+    const promptUuid = randomUUID();
+    userMessage.uuid = promptUuid;
+
+    let promptReplayed = false;
+
     if (session.promptRunning) {
-      const uuid = randomUUID();
-      userMessage.uuid = uuid;
       session.input.push(userMessage);
       const order = session.nextPendingOrder++;
       const cancelled = await new Promise<boolean>((resolve) => {
-        session.pendingMessages.set(uuid, { resolve, order });
+        session.pendingMessages.set(promptUuid, { resolve, order });
       });
       if (cancelled) {
         return { stopReason: "cancelled" };
       }
+      // The replay resolved the promise, mark in this loop too,
+      // so we don't treat the next result as a background task's result.
+      promptReplayed = true;
     } else {
       session.input.push(userMessage);
     }
@@ -541,6 +551,7 @@ export class ClaudeAcpAgent implements Agent {
                     content: { type: "text", text: "\n\nCompacting completed." },
                   },
                 });
+                promptReplayed = true;
                 break;
               }
               case "local_command_output": {
@@ -551,6 +562,7 @@ export class ClaudeAcpAgent implements Agent {
                     content: { type: "text", text: message.content },
                   },
                 });
+                promptReplayed = true;
                 break;
               }
               case "hook_started":
@@ -569,10 +581,6 @@ export class ClaudeAcpAgent implements Agent {
             }
             break;
           case "result": {
-            if (session.cancelled) {
-              return { stopReason: "cancelled" };
-            }
-
             // Accumulate usage from this result
             session.accumulatedUsage.inputTokens += message.usage.input_tokens;
             session.accumulatedUsage.outputTokens += message.usage.output_tokens;
@@ -598,6 +606,18 @@ export class ClaudeAcpAgent implements Agent {
                   },
                 },
               });
+            }
+
+            if (!promptReplayed) {
+              // This result is from a background task that finished after
+              // the previous prompt loop ended. Consume it and continue
+              // waiting for our own prompt's result.
+              this.logger.log(`Session ${params.sessionId}: consuming background task result`);
+              break;
+            }
+
+            if (session.cancelled) {
+              return { stopReason: "cancelled" };
             }
 
             // Build the usage response
@@ -676,8 +696,14 @@ export class ClaudeAcpAgent implements Agent {
               break;
             }
 
-            // Check for queued prompt replay
+            // Check for prompt replay
             if (message.type === "user" && "uuid" in message && message.uuid) {
+              if (message.uuid === promptUuid) {
+                // Our own prompt was replayed back — we're now processing
+                // our prompt's response (not a background task's).
+                promptReplayed = true;
+                break;
+              }
               const pending = session.pendingMessages.get(message.uuid as string);
               if (pending) {
                 pending.resolve(false);
@@ -848,6 +874,19 @@ export class ClaudeAcpAgent implements Agent {
     await session.query.interrupt();
   }
 
+  async unstable_sessionClose(params: CloseSessionRequest): Promise<CloseSessionResponse> {
+    const session = this.sessions[params.sessionId];
+    if (!session) {
+      throw new Error("Session not found");
+    }
+    await this.cancel({ sessionId: params.sessionId });
+
+    session.abortController.abort();
+    delete this.sessions[params.sessionId];
+
+    return {};
+  }
+
   async unstable_setSessionModel(
     params: SetSessionModelRequest,
   ): Promise<SetSessionModelResponse | void> {
@@ -874,6 +913,9 @@ export class ClaudeAcpAgent implements Agent {
     const session = this.sessions[params.sessionId];
     if (!session) {
       throw new Error("Session not found");
+    }
+    if (typeof params.value !== "string") {
+      throw new Error(`Invalid value for config option ${params.configId}: ${params.value}`);
     }
 
     const option = session.configOptions.find((o) => o.id === params.configId);
@@ -904,7 +946,9 @@ export class ClaudeAcpAgent implements Agent {
     }
 
     session.configOptions = session.configOptions.map((o) =>
-      o.id === params.configId ? { ...o, currentValue: params.value } : o,
+      o.id === params.configId && typeof o.currentValue === "string"
+        ? { ...o, currentValue: params.value }
+        : o,
     );
 
     return { configOptions: session.configOptions };
@@ -985,25 +1029,25 @@ export class ClaudeAcpAgent implements Agent {
       }
 
       if (toolName === "ExitPlanMode") {
+        const options = [
+          {
+            kind: "allow_always",
+            name: "Yes, and auto-accept edits",
+            optionId: "acceptEdits",
+          },
+          { kind: "allow_once", name: "Yes, and manually approve edits", optionId: "default" },
+          { kind: "reject_once", name: "No, keep planning", optionId: "plan" },
+        ];
+        if (ALLOW_BYPASS) {
+          options.unshift({
+            kind: "allow_always",
+            name: "Yes, and bypass permissions",
+            optionId: "bypassPermissions",
+          });
+        }
+
         const response = await this.client.requestPermission({
-          options: [
-            {
-              kind: "allow_always",
-              name: "Yes, and auto-accept edits",
-              optionId: "acceptEdits",
-            },
-            ...(ALLOW_BYPASS
-              ? [
-                  {
-                    kind: "allow_always" as const,
-                    name: "Yes, and bypass permissions",
-                    optionId: "bypassPermissions",
-                  },
-                ]
-              : []),
-            { kind: "allow_once", name: "Yes, and manually approve edits", optionId: "default" },
-            { kind: "reject_once", name: "No, keep planning", optionId: "plan" },
-          ],
+          options,
           sessionId,
           toolCall: {
             toolCallId: toolUseID,
@@ -1140,7 +1184,7 @@ export class ClaudeAcpAgent implements Agent {
     if (!session) return;
 
     session.configOptions = session.configOptions.map((o) =>
-      o.id === configId ? { ...o, currentValue: value } : o,
+      o.id === configId && typeof o.currentValue === "string" ? { ...o, currentValue: value } : o,
     );
 
     await this.client.sessionUpdate({
@@ -1240,6 +1284,8 @@ export class ClaudeAcpAgent implements Agent {
       userProvidedOptions?.tools ??
       (params._meta?.disableBuiltInTools === true ? [] : { type: "preset", preset: "claude_code" });
 
+    const abortController = userProvidedOptions?.abortController || new AbortController();
+
     const options: Options = {
       systemPrompt,
       settingSources: ["user", "project", "local"],
@@ -1304,6 +1350,7 @@ export class ClaudeAcpAgent implements Agent {
         ],
       },
       ...creationOpts,
+      abortController,
     };
 
     if (creationOpts?.resume === undefined || creationOpts?.forkSession) {
@@ -1312,7 +1359,6 @@ export class ClaudeAcpAgent implements Agent {
     }
 
     // Handle abort controller from meta options
-    const abortController = userProvidedOptions?.abortController;
     if (abortController?.signal.aborted) {
       throw new Error("Cancelled");
     }
@@ -1401,6 +1447,7 @@ export class ClaudeAcpAgent implements Agent {
       pendingMessages: new Map(),
       nextPendingOrder: 0,
       fileEditInterceptor,
+      abortController,
     };
 
     return {
