@@ -742,6 +742,17 @@ export class ClaudeAcpAgent implements Agent {
               this.logger.error(message.message.content);
               break;
             }
+            // Skip these user messages for now, since they seem to just be messages we don't want in the feed
+            if (
+              message.type === "user" &&
+              (typeof message.message.content === "string" ||
+                (Array.isArray(message.message.content) &&
+                  message.message.content.length === 1 &&
+                  message.message.content[0].type === "text"))
+            ) {
+              break;
+            }
+
             if (
               message.type === "assistant" &&
               message.message.model === "<synthetic>" &&
@@ -753,23 +764,13 @@ export class ClaudeAcpAgent implements Agent {
               throw RequestError.authRequired();
             }
 
-            // String content is a plain text echo — skip
-            if (typeof message.message.content === "string") {
-              break;
-            }
-
-            // Filter text and thinking blocks from all messages:
-            // - Assistant text/thinking are already handled by stream events above
-            // - User text blocks are SDK echoes that shouldn't appear in the output feed
-            // Keep tool_result, tool_use, and other non-text blocks (e.g. terminal output)
-            const content = (message.message.content as BetaContentBlock[]).filter(
-              (item) => !["text", "thinking"].includes(item.type),
-            );
-
-            // Nothing left after filtering — skip (pure text user echo, etc.)
-            if (content.length === 0) {
-              break;
-            }
+            const content =
+              message.type === "assistant"
+                ? // Handled by stream events above
+                  message.message.content.filter(
+                    (item) => !["text", "thinking"].includes(item.type),
+                  )
+                : message.message.content;
 
             for (const notification of toAcpNotifications(
               content,

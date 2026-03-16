@@ -98,14 +98,6 @@ The main feature. When Claude edits or creates a file, the change appears in Zed
 - **Project-scoped** — Only files within the project directory are intercepted. Files outside the project (e.g., `~/.claude/settings.json`) are written directly by the built-in tools.
 - **Safe fallback** — If ACP routing fails, the new content is restored to disk so the edit isn't lost. Uncached files (never explicitly Read) skip the revert step.
 
-### ExitPlanMode "Bypass Permissions" Option
-
-When Claude exits plan mode, the permission dialog includes **"Yes, and bypass permissions"** alongside the existing "auto-accept edits" and "manually approve edits" options. This maps to Claude Code's `dangerouslySkipPermissions` mode (only available in non-root / sandboxed environments where `ALLOW_BYPASS` is true).
-
-### Improved User Message Filtering
-
-The upstream adapter skips user messages that are plain text or single-text-block arrays. This fork uses a unified approach: `text` and `thinking` blocks are filtered from **all** message types (user and assistant), keeping only structured blocks like `tool_result` and `tool_use`. This handles edge cases like user messages containing mixed content (tool results alongside text echoes).
-
 ### All Upstream Features
 
 Everything else works unchanged:
@@ -131,7 +123,7 @@ This fork is designed for easy merges. All changes are additive:
 
 | File | Change | Merge notes |
 |------|--------|-------------|
-| `src/acp-agent.ts` | `FileEditInterceptor` creation + wiring in `createSession()`, forwarding in `toAcpNotifications`/`streamEventToAcpNotifications`, unified message filtering in `prompt()`, `bypassPermissions` option in `canUseTool()` | Keep blocks in same logical positions. The `prompt()` message filtering replaces upstream's user-message-skip logic with a unified filter. |
+| `src/acp-agent.ts` | `FileEditInterceptor` creation + wiring in `createSession()`, forwarding in `toAcpNotifications`/`streamEventToAcpNotifications` | All changes are purely additive insertion blocks |
 | `src/tools.ts` | `fs` import, `extractReadContent`, `isToolError`, `FileEditInterceptor` interface + `createFileEditInterceptor` factory appended at EOF, `onFileRead` option added to `createPostToolUseHook` | Additions at end of file; shouldn't conflict |
 | `src/lib.ts` | 2 export lines (`createFileEditInterceptor`, `FileEditInterceptor` type) | Re-add if upstream changes exports |
 | `package.json` | No changes | — |
