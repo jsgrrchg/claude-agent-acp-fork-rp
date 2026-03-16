@@ -1328,7 +1328,14 @@ describe("stop reason propagation", () => {
       input,
       cancelled: false,
       cwd: "/test",
-      permissionMode: "default",
+      modes: {
+        currentModeId: "default",
+        availableModes: [],
+      },
+      models: {
+        currentModelId: "default",
+        availableModels: [],
+      },
       settingsManager: {} as any,
       accumulatedUsage: {
         inputTokens: 0,
@@ -1455,7 +1462,14 @@ describe("stop reason propagation", () => {
       input,
       cwd: "/tmp/test",
       cancelled: false,
-      permissionMode: "default",
+      modes: {
+        currentModeId: "default",
+        availableModes: [],
+      },
+      models: {
+        currentModelId: "default",
+        availableModels: [],
+      },
       settingsManager: {} as any,
       accumulatedUsage: {
         inputTokens: 0,
@@ -1521,7 +1535,14 @@ describe("session/close", () => {
       input: new Pushable(),
       cancelled: false,
       cwd: "/test",
-      permissionMode: "default",
+      modes: {
+        currentModeId: "default",
+        availableModes: [],
+      },
+      models: {
+        currentModelId: "default",
+        availableModels: [],
+      },
       settingsManager: {} as any,
       accumulatedUsage: {
         inputTokens: 0,
@@ -1544,7 +1565,7 @@ describe("session/close", () => {
 
     expect(agent.sessions["session-1"]).toBeDefined();
 
-    const result = await agent.unstable_sessionClose({ sessionId: "session-1" });
+    const result = await agent.unstable_closeSession({ sessionId: "session-1" });
 
     expect(result).toEqual({});
     expect(agent.sessions["session-1"]).toBeUndefined();
@@ -1557,7 +1578,7 @@ describe("session/close", () => {
 
     expect(session.abortController.signal.aborted).toBe(false);
 
-    await agent.unstable_sessionClose({ sessionId: "session-2" });
+    await agent.unstable_closeSession({ sessionId: "session-2" });
 
     expect(session.abortController.signal.aborted).toBe(true);
   });
@@ -1565,7 +1586,7 @@ describe("session/close", () => {
   it("should throw when closing a non-existent session", async () => {
     const agent = createMockAgent();
 
-    await expect(agent.unstable_sessionClose({ sessionId: "non-existent" })).rejects.toThrow(
+    await expect(agent.unstable_closeSession({ sessionId: "non-existent" })).rejects.toThrow(
       "Session not found",
     );
   });
@@ -1575,7 +1596,7 @@ describe("session/close", () => {
     injectSession(agent, "session-a");
     injectSession(agent, "session-b");
 
-    await agent.unstable_sessionClose({ sessionId: "session-a" });
+    await agent.unstable_closeSession({ sessionId: "session-a" });
 
     expect(agent.sessions["session-a"]).toBeUndefined();
     expect(agent.sessions["session-b"]).toBeDefined();
