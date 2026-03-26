@@ -40,6 +40,7 @@ import {
   TerminalOutputResponse,
   WriteTextFileRequest,
   WriteTextFileResponse,
+  StopReason,
 } from "@agentclientprotocol/sdk";
 import {
   CanUseTool,
@@ -229,6 +230,10 @@ function shouldHideClaudeAuth(): boolean {
 // Bypass Permissions doesn't work if we are a root/sudo user
 const IS_ROOT = (process.geteuid?.() ?? process.getuid?.()) === 0;
 const ALLOW_BYPASS = !IS_ROOT || !!process.env.IS_SANDBOX;
+
+// Slash commands that the SDK handles locally without replaying the user
+// message and without invoking the model.
+const LOCAL_ONLY_COMMANDS = new Set(["/context", "/heapdump", "/extra-usage"]);
 
 const PERMISSION_MODE_ALIASES: Record<string, PermissionMode> = {
   default: "default",
@@ -472,7 +477,12 @@ export class ClaudeAcpAgent implements Agent {
     const promptUuid = randomUUID();
     userMessage.uuid = promptUuid;
 
-    let promptReplayed = false;
+    // These local-only commands return a result without replaying the user
+    // message. Mark promptReplayed=true so their result isn't consumed as a
+    // background task result.
+    const firstText = params.prompt[0]?.type === "text" ? params.prompt[0].text : "";
+    const isLocalOnlyCommand =
+      firstText.startsWith("/") && LOCAL_ONLY_COMMANDS.has(firstText.split(" ", 1)[0]);
 
     if (session.promptRunning) {
       session.input.push(userMessage);
@@ -483,15 +493,13 @@ export class ClaudeAcpAgent implements Agent {
       if (cancelled) {
         return { stopReason: "cancelled" };
       }
-      // The replay resolved the promise, mark in this loop too,
-      // so we don't treat the next result as a background task's result.
-      promptReplayed = true;
     } else {
       session.input.push(userMessage);
     }
 
     session.promptRunning = true;
     let handedOff = false;
+    let stopReason: StopReason = "end_turn";
 
     try {
       while (true) {
@@ -532,7 +540,6 @@ export class ClaudeAcpAgent implements Agent {
                     content: { type: "text", text: "\n\nCompacting completed." },
                   },
                 });
-                promptReplayed = true;
                 break;
               }
               case "local_command_output": {
@@ -543,7 +550,12 @@ export class ClaudeAcpAgent implements Agent {
                     content: { type: "text", text: message.content },
                   },
                 });
-                promptReplayed = true;
+                break;
+              }
+              case "session_state_changed": {
+                if (message.state === "idle") {
+                  return { stopReason, usage: sessionUsage(session) };
+                }
                 break;
               }
               case "hook_started":
@@ -554,6 +566,7 @@ export class ClaudeAcpAgent implements Agent {
               case "task_notification":
               case "task_progress":
               case "elicitation_complete":
+              case "api_retry":
                 // Todo: process via status api: https://docs.claude.com/en/docs/claude-code/hooks#hook-output
                 break;
               default:
@@ -589,30 +602,10 @@ export class ClaudeAcpAgent implements Agent {
               });
             }
 
-            if (!promptReplayed) {
-              // This result is from a background task that finished after
-              // the previous prompt loop ended. Consume it and continue
-              // waiting for our own prompt's result.
-              this.logger.log(`Session ${params.sessionId}: consuming background task result`);
+            if (session.cancelled) {
+              stopReason = "cancelled";
               break;
             }
-
-            if (session.cancelled) {
-              return { stopReason: "cancelled" };
-            }
-
-            // Build the usage response
-            const usage: PromptResponse["usage"] = {
-              inputTokens: session.accumulatedUsage.inputTokens,
-              outputTokens: session.accumulatedUsage.outputTokens,
-              cachedReadTokens: session.accumulatedUsage.cachedReadTokens,
-              cachedWriteTokens: session.accumulatedUsage.cachedWriteTokens,
-              totalTokens:
-                session.accumulatedUsage.inputTokens +
-                session.accumulatedUsage.outputTokens +
-                session.accumulatedUsage.cachedReadTokens +
-                session.accumulatedUsage.cachedWriteTokens,
-            };
 
             switch (message.subtype) {
               case "success": {
@@ -620,16 +613,32 @@ export class ClaudeAcpAgent implements Agent {
                   throw RequestError.authRequired();
                 }
                 if (message.stop_reason === "max_tokens") {
-                  return { stopReason: "max_tokens", usage };
+                  stopReason = "max_tokens";
+                  break;
                 }
                 if (message.is_error) {
                   throw RequestError.internalError(undefined, message.result);
                 }
-                return { stopReason: "end_turn", usage };
+                // For local-only commands (no model invocation), the result
+                // text is the command output — forward it to the client.
+                if (isLocalOnlyCommand) {
+                  for (const notification of toAcpNotifications(
+                    message.result,
+                    "assistant",
+                    params.sessionId,
+                    this.toolUseCache,
+                    this.client,
+                    this.logger,
+                  )) {
+                    await this.client.sessionUpdate(notification);
+                  }
+                }
+                break;
               }
-              case "error_during_execution":
+              case "error_during_execution": {
                 if (message.stop_reason === "max_tokens") {
-                  return { stopReason: "max_tokens", usage };
+                  stopReason = "max_tokens";
+                  break;
                 }
                 if (message.is_error) {
                   throw RequestError.internalError(
@@ -637,7 +646,9 @@ export class ClaudeAcpAgent implements Agent {
                     message.errors.join(", ") || message.subtype,
                   );
                 }
-                return { stopReason: "end_turn", usage };
+                stopReason = "end_turn";
+                break;
+              }
               case "error_max_budget_usd":
               case "error_max_turns":
               case "error_max_structured_output_retries":
@@ -647,7 +658,8 @@ export class ClaudeAcpAgent implements Agent {
                     message.errors.join(", ") || message.subtype,
                   );
                 }
-                return { stopReason: "max_turn_requests", usage };
+                stopReason = "max_turn_requests";
+                break;
               default:
                 unreachable(message, this.logger);
                 break;
@@ -680,11 +692,9 @@ export class ClaudeAcpAgent implements Agent {
             // Check for prompt replay
             if (message.type === "user" && "uuid" in message && message.uuid) {
               if (message.uuid === promptUuid) {
-                // Our own prompt was replayed back — we're now processing
-                // our prompt's response (not a background task's).
-                promptReplayed = true;
                 break;
               }
+
               const pending = session.pendingMessages.get(message.uuid as string);
               if (pending) {
                 pending.resolve(false);
@@ -692,7 +702,7 @@ export class ClaudeAcpAgent implements Agent {
                 handedOff = true;
                 // the current loop stops with end_turn,
                 // the loop of the next prompt continues running
-                return { stopReason: "end_turn" };
+                return { stopReason: "end_turn", usage: sessionUsage(session) };
               }
               if ("isReplay" in message && message.isReplay) {
                 // not pending or unrelated replay message
@@ -716,22 +726,6 @@ export class ClaudeAcpAgent implements Agent {
               typeof message.message.content === "string" &&
               message.message.content.includes("<local-command-stdout>")
             ) {
-              // Handle /context by sending its reply as regular agent message.
-              if (message.message.content.includes("Context Usage")) {
-                for (const notification of toAcpNotifications(
-                  message.message.content
-                    .replace("<local-command-stdout>", "")
-                    .replace("</local-command-stdout>", ""),
-                  "assistant",
-                  params.sessionId,
-                  this.toolUseCache,
-                  this.client,
-                  this.logger,
-                  { clientCapabilities: this.clientCapabilities },
-                )) {
-                  await this.client.sessionUpdate(notification);
-                }
-              }
               this.logger.log(message.message.content);
               break;
             }
@@ -816,6 +810,7 @@ export class ClaudeAcpAgent implements Agent {
         message.includes("Failed to write to process stdin")
       ) {
         this.logger.error(`Session ${params.sessionId}: Claude Agent process died: ${message}`);
+        session.settingsManager.dispose();
         session.input.end();
         delete this.sessions[params.sessionId];
         throw RequestError.internalError(
@@ -863,6 +858,7 @@ export class ClaudeAcpAgent implements Agent {
     }
     await this.cancel({ sessionId: params.sessionId });
 
+    session.settingsManager.dispose();
     session.abortController.abort();
     delete this.sessions[params.sessionId];
 
@@ -1340,6 +1336,8 @@ export class ClaudeAcpAgent implements Agent {
         ...process.env,
         ...userProvidedOptions?.env,
         ...createEnvForGateway(this.gatewayAuthMeta),
+        // Opt-in to session state events like when the agent is idle
+        CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
       },
       // Override certain fields that must be controlled by ACP
       cwd: params.cwd,
@@ -1431,7 +1429,7 @@ export class ClaudeAcpAgent implements Agent {
     if (
       shouldHideClaudeAuth() &&
       initializationResult.account.subscriptionType &&
-      this.gatewayAuthMeta === null
+      !this.gatewayAuthMeta
     ) {
       throw RequestError.authRequired(
         undefined,
@@ -1508,6 +1506,20 @@ export class ClaudeAcpAgent implements Agent {
       configOptions,
     };
   }
+}
+
+function sessionUsage(session: Session) {
+  return {
+    inputTokens: session.accumulatedUsage.inputTokens,
+    outputTokens: session.accumulatedUsage.outputTokens,
+    cachedReadTokens: session.accumulatedUsage.cachedReadTokens,
+    cachedWriteTokens: session.accumulatedUsage.cachedWriteTokens,
+    totalTokens:
+      session.accumulatedUsage.inputTokens +
+      session.accumulatedUsage.outputTokens +
+      session.accumulatedUsage.cachedReadTokens +
+      session.accumulatedUsage.cachedWriteTokens,
+  };
 }
 
 function createEnvForGateway(gatewayMeta?: GatewayAuthMeta) {
@@ -1717,10 +1729,10 @@ export function promptToClaude(prompt: PromptRequest): SDKUserMessage {
       case "text": {
         let text = chunk.text;
         // change /mcp:server:command args -> /server:command (MCP) args
-        const mcpMatch = text.match(/^\/mcp:([^:\s]+):(\S+)(\s+.*)?$/);
+        const mcpMatch = text.match(/^\/mcp:([^:\s]+):(\S+)(?:\s(.*))?$/);
         if (mcpMatch) {
           const [, server, command, args] = mcpMatch;
-          text = `/${server}:${command} (MCP)${args || ""}`;
+          text = `/${server}:${command} (MCP)${args ? ` ${args}` : ""}`;
         }
         content.push({ type: "text", text });
         break;

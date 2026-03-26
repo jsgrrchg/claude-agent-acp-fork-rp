@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.24.1](https://github.com/agentclientprotocol/claude-agent-acp/compare/v0.24.0...v0.24.1) (2026-03-26)
+
+
+### Bug Fixes
+
+* Cleanup based on new idle state [#463](https://github.com/agentclientprotocol/claude-agent-acp/issues/463) ([#480](https://github.com/agentclientprotocol/claude-agent-acp/issues/480)) ([23b3073](https://github.com/agentclientprotocol/claude-agent-acp/commit/23b30730253752f0bc4e30b619a6236f16fafdb9))
+
+## 0.24.0
+
+Rename from `@zed-industries/claude-agent-acp` to `@agentclientprotocol/claude-agent-acp`.
+
+We are moving this to the main ACP org to better allow multiple teams to contribute and maintain this adapter.
+
+## 0.23.1
+
+- Add back error_during_execution break point (#469)
+
+## 0.23.0
+
+- Use idle session state as end of turn (#463)
+- Update claude-agent-sdk to 0.2.83 (#462)
+- Fix handling of local-only slash commands (#432)
+- fix: correct null check for gatewayAuthMeta in subscription validation (#455)
+- fix: include both stdout and stderr in Bash tool output (#456)
+- fix: prevent prompt loop hang when cancel races with first result (#458)
+- fix: dispose SettingsManager on session close to prevent resource leaks (#454)
+- fix: restore plan content in ExitPlanMode tool call (#451)
+
 ## 0.22.2
 
 - Add experimental meta param for testing additional directories
