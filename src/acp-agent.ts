@@ -1011,6 +1011,7 @@ export class ClaudeAcpAgent implements Agent {
 
   private async applySessionMode(sessionId: string, modeId: string): Promise<void> {
     switch (modeId) {
+      case "auto":
       case "default":
       case "acceptEdits":
       case "bypassPermissions":
