@@ -8,6 +8,14 @@ This adapter connects [Claude Code](https://docs.anthropic.com/en/docs/claude-co
 
 The upstream adapter (v0.18.0+) writes files directly to disk. This fork lets the built-in Edit/Write tools execute normally, then immediately reverts the file and routes the new content through Zed's `fs/write_text_file` ACP API, so every file change gets a diff review.
 
+This fork also carries a small set of local session-config improvements on top of `rohan/main`:
+
+- Model capability tracking so config options can react to model support
+- A `fast_mode` selector for models that expose fast mode
+- An `effort_level` selector that keeps the public ACP config ID as `effort_level`
+
+Compatibility note: the `effort_level` support depends on Ben Brandt's upstream PR [#464, "Support effort levels"](https://github.com/agentclientprotocol/claude-agent-acp/pull/464). If that PR is not present upstream, keep this forked implementation (or an equivalent patch) for the effort selector to work as documented.
+
 ## How It Works
 
 ```
@@ -97,6 +105,13 @@ The main feature. When Claude edits or creates a file, the change appears in Zed
 - **No tool redirection** — Claude uses its built-in Edit/Write tools naturally. The PostToolUse hook intercepts after execution — no system prompt or PreToolUse hook needed.
 - **Project-scoped** — Only files within the project directory are intercepted. Files outside the project (e.g., `~/.claude/settings.json`) are written directly by the built-in tools.
 - **Safe fallback** — If ACP routing fails, the new content is restored to disk so the edit isn't lost. Uncached files (never explicitly Read) skip the revert step.
+
+### Additional Session Config Improvements
+
+- **Model-aware config options** — Tracks model capabilities so the UI only shows options supported by the selected model.
+- **Fast mode toggle** — Adds a `fast_mode` session config option when the current model supports it.
+- **Effort level toggle** — Adds an `effort_level` session config option and preserves that public config ID in the ACP surface.
+- **Upstream dependency note** — The `effort_level` behavior depends on Ben Brandt's upstream PR [#464](https://github.com/agentclientprotocol/claude-agent-acp/pull/464).
 
 ### All Upstream Features
 
